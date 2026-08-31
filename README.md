@@ -106,21 +106,39 @@ The policy text compiled into version 0:
 > approved automatically when it requests 2000 GEN or less. Any request above
 > 5000 GEN goes to the committee. Everything else goes to the committee.
 
-What consensus agreed on and stored:
+What consensus agreed on and stored, read back from the live contract:
 
 ```
-0. IF kyc == false                                              -> reject
-1. IF kyc == true AND track == content                          -> committee_review
-2. IF kyc == true AND prior_accepted >= 3
-        AND requested_gen <= 2000                               -> auto_approve
-3. IF kyc == true AND requested_gen > 5000                      -> committee_review
-   default                                                      -> committee_review
+0. IF kyc == false                                                 -> reject
+1. IF track == content                                             -> committee_review
+2. IF prior_accepted >= 3 AND kyc == true AND requested_gen <= 2000 -> auto_approve
+3. IF requested_gen > 5000                                         -> committee_review
+   default                                                         -> committee_review
 ```
 
-Note rule 2. It carries no `track != content` atom, because rule 1 already
-catches the content track above it. A different deployment of the same policy
-compiled that atom in explicitly. Both tables decide identically, which is
-exactly what the agreement rule is built to accept.
+Behavioural fingerprint: `2165931a275a8437f38050a5b8552cba6dd1346c762ede8b1a9606c7195b831f`
+
+Notice how lean the rules are. Rule 1 carries no `kyc == true`, and rule 2 no
+`track != content`, because earlier rules already shadow those cases. The
+compilation is minimal rather than literal, and it is still exactly right.
+
+### The claim, demonstrated across two independent deployments
+
+An earlier deployment of this same contract and policy
+(`0xd04c71A33eE301Cce192918a6755aA60B8ECEEEc`) compiled a **textually different**
+table. Its rule 2 spelled the track condition out:
+
+```
+2. IF kyc == true AND track != content AND prior_accepted >= 3
+        AND requested_gen <= 2000                                  -> auto_approve
+```
+
+Its behavioural fingerprint is
+`2165931a275a8437f38050a5b8552cba6dd1346c762ede8b1a9606c7195b831f`.
+
+The same value. Two separate compilations, two different tables, one identical
+behaviour. That is the property the agreement rule exists to recognise, observed
+on chain rather than argued for.
 
 `evaluate`, with no model involved:
 
