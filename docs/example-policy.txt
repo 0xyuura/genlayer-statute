@@ -1,0 +1,1 @@
+Applications without completed KYC are rejected. Content track applications are never approved automatically, they always go to the committee. A team that already has three or more accepted contributions and has completed KYC is approved automatically when it requests 2000 GEN or less. Any request above 5000 GEN goes to the committee. Everything else goes to the committee.
