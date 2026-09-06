@@ -24,7 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
 import statute as st                                      # noqa: E402
 
 
+# Coarse on purpose: age moves in tens, so this schema exercises the rule
+# that the declared domain is the whole domain, and that nothing between
+# two declared points is decidable at all.
 FACTS = "age:int:0:100:10\ntier:enum:bronze,silver,gold\nverified:bool"
+# Every integer admissible. Boundary behaviour is only meaningful when
+# single units are in the domain, so agreement and diff are tested here.
+FINE = "age:int:0:100:1\ntier:enum:bronze,silver,gold\nverified:bool"
 OUTCOMES = "approve,review,deny"
 
 
@@ -219,11 +225,10 @@ class Agreement(unittest.TestCase):
     """The core of the primitive: validators agree on behaviour, not on text."""
 
     def setUp(self):
-        self.schema = st.parse_schema(FACTS)
+        self.schema = st.parse_schema(FINE)
 
     def agree(self, a, b):
-        return st.tables_agree(a, b, self.schema,
-                               st.boundary_probes(self.schema, [a, b]))
+        return st.tables_agree(a, b, self.schema)
 
     def test_same_table_agrees_with_itself(self):
         t = table([rule("deny", ("age", "<", 18))])
@@ -258,9 +263,8 @@ class Agreement(unittest.TestCase):
         checked = 0
         for a in built:
             for b in built:
-                probes = st.boundary_probes(self.schema, [a, b])
-                self.assertEqual(st.tables_agree(a, b, self.schema, probes),
-                                 st.tables_agree(b, a, self.schema, probes))
+                self.assertEqual(st.tables_agree(a, b, self.schema),
+                                 st.tables_agree(b, a, self.schema))
                 checked += 1
         self.assertEqual(checked, len(cuts) ** 2)
 
@@ -276,8 +280,7 @@ class Agreement(unittest.TestCase):
         agreed = 0
         for a in built:
             for b in built:
-                probes = st.boundary_probes(self.schema, [a, b])
-                if st.tables_agree(a, b, self.schema, probes):
+                if st.tables_agree(a, b, self.schema):
                     for facts in grid:
                         self.assertEqual(
                             st.evaluate_table(a, facts, self.schema),
@@ -289,31 +292,28 @@ class Agreement(unittest.TestCase):
 
 class DeadRules(unittest.TestCase):
     def setUp(self):
-        self.schema = st.parse_schema(FACTS)
+        self.schema = st.parse_schema(FINE)
 
     def test_a_shadowed_rule_is_reported(self):
         t = table([rule("deny", ("age", "<", 30)),
                    rule("approve", ("age", "<", 20))])
-        probes = st.boundary_probes(self.schema, [t])
-        self.assertEqual(st.dead_rules(t, self.schema, probes), [1])
+        self.assertEqual(st.dead_rules(t, self.schema), [1])
 
     def test_a_live_rule_is_not_reported(self):
         t = table([rule("deny", ("age", "<", 20)),
                    rule("approve", ("age", "<", 30))])
-        probes = st.boundary_probes(self.schema, [t])
-        self.assertEqual(st.dead_rules(t, self.schema, probes), [])
+        self.assertEqual(st.dead_rules(t, self.schema), [])
 
     def test_a_table_with_a_dead_rule_is_refused_by_agreement(self):
         live = table([rule("deny", ("age", "<", 30))])
         dead = table([rule("deny", ("age", "<", 30)),
                       rule("deny", ("age", "<", 20))])
-        probes = st.boundary_probes(self.schema, [live, dead])
-        self.assertFalse(st.tables_agree(live, dead, self.schema, probes))
+        self.assertFalse(st.tables_agree(live, dead, self.schema))
 
 
 class Fingerprint(unittest.TestCase):
     def setUp(self):
-        self.schema = st.parse_schema(FACTS)
+        self.schema = st.parse_schema(FINE)
 
     def test_is_stable(self):
         t = table([rule("deny", ("age", "<", 18))])
@@ -332,30 +332,27 @@ class Fingerprint(unittest.TestCase):
         self.assertNotEqual(st.fingerprint(a, self.schema),
                             st.fingerprint(b, self.schema))
 
-    def test_resolution_below_the_declared_step_is_invisible(self):
-        """A deliberate, documented limit, pinned so it cannot drift.
+    def test_a_finer_threshold_is_now_a_real_behaviour_change(self):
+        """This used to pin a documented blind spot. It now pins its removal.
 
-        The fingerprint is behaviour on the canonical grid, and the grid is
-        the schema's own declared step. With age declared at step 10, a
-        threshold at 18 and a threshold at 19 decide identically at every
-        grid point, so they share a fingerprint and `diff` reports nothing.
-        Declare a finer step when a policy really turns on single units.
-
-        Consensus is unaffected: agreement runs on boundary probes, which do
-        carry c-1, c, c+1, so the two tables below still fail to agree.
+        On the fine schema a threshold at 18 and one at 19 differ at exactly
+        one age, and every layer must say so: the fingerprints differ, diff
+        names the point, and two validators holding these tables refuse to
+        agree.
         """
         a = table([rule("deny", ("age", "<", 18))], default="approve")
         b = table([rule("deny", ("age", "<", 19))], default="approve")
-        self.assertEqual(st.fingerprint(a, self.schema),
-                         st.fingerprint(b, self.schema))
-        self.assertEqual(st.diff_points(a, b, self.schema, 50), [])
-        probes = st.boundary_probes(self.schema, [a, b])
-        self.assertFalse(st.tables_agree(a, b, self.schema, probes))
+        self.assertNotEqual(st.fingerprint(a, self.schema),
+                            st.fingerprint(b, self.schema))
+        pts = st.diff_points(a, b, self.schema, 50)
+        self.assertTrue(pts)
+        self.assertTrue(all(p["facts"]["age"] == 18 for p in pts))
+        self.assertFalse(st.tables_agree(a, b, self.schema))
 
 
 class Diff(unittest.TestCase):
     def setUp(self):
-        self.schema = st.parse_schema(FACTS)
+        self.schema = st.parse_schema(FINE)
 
     def test_identical_behaviour_has_no_differences(self):
         t = table([rule("deny", ("age", "<", 18))], default="approve")
@@ -366,10 +363,125 @@ class Diff(unittest.TestCase):
         b = table([rule("deny", ("age", "<", 10))], default="approve")
         pts = st.diff_points(a, b, self.schema, 200)
         self.assertTrue(pts)
-        self.assertTrue(all(p["facts"]["age"] == 10 for p in pts))
-        self.assertEqual(len(pts), 3 * 2)
+        self.assertTrue(all(10 <= p["facts"]["age"] <= 19 for p in pts))
+        self.assertEqual(len(pts), 10 * 3 * 2)
         self.assertEqual(pts[0]["from"], "deny")
         self.assertEqual(pts[0]["to"], "approve")
+
+
+class CanonicalDomain(unittest.TestCase):
+    """The declared domain is the whole domain.
+
+    Everything else in this contract rests on one identity: the set of fact
+    combinations `evaluate` accepts is exactly the set the agreement check, the
+    fingerprint and `diff` walk. If those two sets ever drift apart, a case can
+    exist that the contract decides but never checked, which is precisely the
+    class of defect this file exists to prevent.
+    """
+
+    def setUp(self):
+        self.schema = st.parse_schema(FACTS)      # age in steps of ten
+        self.age = self.schema[0]
+
+    def test_declared_points_are_in_the_domain(self):
+        for value in (0, 10, 50, 100):
+            self.assertTrue(st.in_domain(self.age, value), value)
+
+    def test_values_between_declared_points_are_not(self):
+        for value in (1, 16, 55, 99):
+            self.assertFalse(st.in_domain(self.age, value), value)
+
+    def test_out_of_range_is_not_in_the_domain(self):
+        self.assertFalse(st.in_domain(self.age, -1))
+        self.assertFalse(st.in_domain(self.age, 101))
+
+    def test_booleans_are_not_integers(self):
+        self.assertFalse(st.in_domain(self.age, True))
+
+    def test_evaluate_refuses_a_value_between_declared_points(self):
+        t = table([rule("deny", ("age", "<", 18))], default="approve")
+        facts = {"age": 16, "tier": "gold", "verified": True}
+        with self.assertRaises(st.gl.vm.UserError) as caught:
+            st.evaluate_table(t, facts, self.schema)
+        self.assertIn("FACT_OFF_GRID", caught.exception.message)
+
+    def test_everything_evaluate_accepts_is_on_the_canonical_grid(self):
+        """The identity itself, checked rather than asserted in a comment."""
+        grid = st.canonical_grid(self.schema)
+        seen = {(f["age"], f["tier"], f["verified"]) for f in grid}
+        t = table([rule("deny", ("age", "<", 18))], default="approve")
+        accepted = set()
+        for age in range(-5, 106):
+            for tier in ("bronze", "silver", "gold", "platinum"):
+                for verified in (True, False):
+                    facts = {"age": age, "tier": tier, "verified": verified}
+                    try:
+                        st.evaluate_table(t, facts, self.schema)
+                    except st.gl.vm.UserError:
+                        continue
+                    accepted.add((age, tier, verified))
+        self.assertEqual(accepted, seen)
+
+
+class RejectionRegression(unittest.TestCase):
+    """The defect this contract was rejected for, pinned so it cannot return.
+
+    Review, verbatim: "Integer boundary candidates are thinned to 12 values, so
+    with several thresholds an adjacent <50 versus <51 difference can lose both
+    50 and 51, pass every retained probe and dead-rule check, yet decide x=50
+    differently."
+
+    That was accurate. The old agreement check kept the declared bounds plus
+    c-1, c, c+1 around each integer constant and then thinned the result to at
+    most twelve values per fact, and with eight thresholds declared the thinning
+    dropped 50 while keeping 49 and 51. Agreement now walks the whole declared
+    domain, so no thinning step exists to get wrong.
+    """
+
+    def setUp(self):
+        self.schema = st.parse_schema("x:int:0:100:1")
+
+    def build(self, last):
+        rules = []
+        for i, t in enumerate((2, 4, 6, 8, 10, 12, 14, 16)):
+            rules.append(rule("approve" if i % 2 == 0 else "deny",
+                              ("x", "<", t)))
+        rules.append(rule("approve", ("x", "<", last)))
+        return table(rules, default="deny")
+
+    def test_the_two_tables_really_do_decide_x_50_differently(self):
+        """Ground truth first, so the test below cannot pass vacuously."""
+        a, b = self.build(50), self.build(51)
+        differ = [x for x in range(0, 101)
+                  if st.evaluate_table(a, {"x": x}, self.schema) !=
+                     st.evaluate_table(b, {"x": x}, self.schema)]
+        self.assertEqual(differ, [50])
+
+    def test_neither_table_has_a_dead_rule(self):
+        """So the disagreement has to be caught by outcomes, not by a
+        reachability check that happens to fire for another reason."""
+        for last in (50, 51):
+            self.assertEqual(st.dead_rules(self.build(last), self.schema), [])
+
+    def test_agreement_catches_the_adjacent_boundary(self):
+        a, b = self.build(50), self.build(51)
+        self.assertFalse(st.tables_agree(a, b, self.schema))
+        self.assertFalse(st.tables_agree(b, a, self.schema))
+
+    def test_every_adjacent_threshold_pair_is_caught(self):
+        """Not just the reported pair. Any two adjacent cut points differ at
+        exactly one value, and every one of them must be refused."""
+        for last in range(20, 100):
+            a, b = self.build(last), self.build(last + 1)
+            self.assertFalse(st.tables_agree(a, b, self.schema),
+                             "agreed on <%d versus <%d" % (last, last + 1))
+
+    def test_agreement_still_accepts_honest_rewordings(self):
+        """The fix must not simply refuse everything."""
+        a = self.build(50)
+        b = table([r for r in a["rules"][:-1]] +
+                  [rule("deny", ("x", ">=", 50))], default="approve")
+        self.assertTrue(st.tables_agree(a, b, self.schema))
 
 
 if __name__ == "__main__":

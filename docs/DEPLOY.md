@@ -15,11 +15,28 @@
 
 | Field | Value |
 | --- | --- |
-| Contract | `0xB7255423EaF0A021Df3551BEaaafDbC3bdaa1868` |
-| Deploy tx | `0x2e4c0acc7bffc286ace04ffa75e70146a820fa43ba2f7a437be1372e477bfe71` |
-| Deploy result | `ACCEPTED` / `FINISHED_WITH_RETURN` |
-| Versions compiled | 2 |
+| Contract | `0x54378836847a768Db56918E8Fa38149c7db780c1` |
+| Deploy tx | `0x064e628fb6654cfd62b37e84c95c6fa2375d2b8aef9d485bac60b02dbdcf6b7b` |
+| Deploy result | `ACCEPTED` / `AGREE` / `FINISHED_WITH_RETURN`, 3 validators |
+| Versions compiled | 2, both through consensus on the rewritten agreement check |
 | Deployer | `0xfb332ad96268a9974d32f87daa335f553478a67d` |
+| Superseded | `0xB7255423EaF0A021Df3551BEaaafDbC3bdaa1868`, the rejected revision |
+
+### Verified live on this deployment
+
+| Call | Result |
+| --- | --- |
+| `compile_policy` v1 | `ACCEPTED` / `AGREE` / `FINISHED_WITH_RETURN` |
+| `compile_policy` v2 | `ACCEPTED` / `AGREE` / `FINISHED_WITH_RETURN` (one `LEADER_TIMEOUT` first, retried) |
+| `evaluate` on grid, `requested_gen` 1500 | `auto_approve` |
+| `evaluate` off grid, `requested_gen` 1501 | refused, `[EXPECTED] FACT_OFF_GRID` |
+| `diff(0, 1)` | 48 changed fact combinations |
+| `get_version(0).behaviour` | `2165931a275a8437f38050a5b8552cba6dd1346c762ede8b1a9606c7195b831f` |
+| `get_version(1).behaviour` | `8a38c8c9ccd694416e988b8af785c108fecf0aef32b810c6054d7cbc600eca0f` |
+
+The v0 fingerprint is byte for byte the one the two earlier deployments
+produced, so the rewrite closed the consensus holes without moving any on-grid
+decision.
 
 Constructor arguments:
 
@@ -34,7 +51,7 @@ outcomes: auto_approve,committee_review,reject
 pip install genvm-linter
 genvm-lint check contracts/statute.py        # must print ok: true
 genvm-lint typecheck contracts/statute.py    # must print no type errors
-python -m unittest discover -s tests         # 50 tests
+python -m unittest discover -s tests         # 61 tests
 ```
 
 ## Account safety

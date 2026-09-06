@@ -25,17 +25,33 @@ otherwise deny" are the same policy written the other way round. A validator
 that diffs the JSON would reject both honest peers forever.
 
 So validators do not compare tables. Each validator compiles the policy itself,
-then compares what the two tables *decide* on a probe set that both can derive
-deterministically: every declared enum member, both booleans, and for every
-integer fact the declared bounds plus c-1, c, c+1 around every integer constant
-appearing in either table. Boundary errors are exactly the errors this class of
-compilation makes, so that is where the probes are placed.
+then compares what the two tables *decide* over the whole canonical domain: the
+schema declares a finite set of admissible values per fact, and agreement is
+checked at every point of their product. Nothing is sampled and nothing is
+thinned, so two tables that agree cannot decide any admissible case
+differently.
+
+The schema is what makes that affordable. `parse_schema` refuses any schema
+whose domain exceeds MAX_GRID, so a policy whose behaviour this contract could
+not enumerate in full is rejected before it is ever compiled, rather than
+approximated afterwards. `evaluate` accepts exactly the domain the grid visits
+and refuses anything between two declared points, which is what keeps the
+agreement check, the fingerprint and `diff` talking about the same set of
+cases.
+
+An earlier version of this contract sampled instead. It kept the declared
+bounds plus c-1, c, c+1 around every integer constant, then thinned each fact
+to at most twelve values, and a thinned list could drop a boundary that
+mattered: a leader compiling `x < 50` against a validator compiling `x < 51`
+could lose both 50 and 51, agree on every retained point, and still decide
+x = 50 differently. That defect is why exhaustiveness is now the rule, and the
+case is pinned in the tests.
 
 This is the lesson from a previous contract of ours, stated as a rule: validate
 the decision the contract will actually store, not the intermediate reading that
 produced it.
 
-Two further checks run on the same probe set, because a table can be
+Two further checks run over the same domain, because a table can be
 behaviourally right and still be junk:
 
   * a table carrying a rule that can never fire, because earlier rules already
@@ -47,8 +63,9 @@ behaviourally right and still be junk:
 
 What you get that an off chain model call cannot give you
 ---------------------------------------------------------
-Because the canonical probe grid is fixed by the schema alone, every compiled
-version has a stable behavioural fingerprint. That makes `diff` possible: when a
+Because the canonical grid is fixed by the schema alone, and because it is the
+whole of what `evaluate` accepts, every compiled version has a stable
+behavioural fingerprint that covers every case the contract can be asked. That makes `diff` possible: when a
 policy is amended, the contract reports, deterministically and on chain, exactly
 which fact combinations change outcome. "We reworded clause 4" and "we changed
 who gets approved" become distinguishable, which is the question anyone
@@ -76,13 +93,14 @@ from genlayer import *
 ERROR_EXPECTED = "[EXPECTED]"
 ERROR_LLM = "[LLM_ERROR]"
 
-# Bounds. Every one of these keeps a probe set, and therefore gas, finite.
+# Bounds. MAX_GRID is the important one: it is the largest canonical domain
+# this contract will accept, and therefore the most work an agreement check can
+# ever do. A schema whose domain does not fit is refused at parse time rather
+# than sampled, which is the whole point of the rewrite described above.
 MAX_FACTS = 6
 MAX_ENUM_MEMBERS = 12
 MAX_OUTCOMES = 8
 MAX_GRID = 4096
-MAX_PROBES = 20000
-MAX_VALUES_PER_FACT = 12
 MAX_RULES = 64
 MAX_ATOMS_PER_RULE = 6
 MAX_POLICY_CHARS = 4000
@@ -186,6 +204,26 @@ def domain_of(fact: dict) -> list:
     if fact["kind"] == "enum":
         return list(fact["members"])
     return [False, True]
+
+
+def in_domain(fact: dict, value) -> bool:
+    """True when `value` is one of the points the canonical grid visits.
+
+    `evaluate` and the agreement check are held to this one definition on
+    purpose. If `evaluate` accepted a value the grid never visits, two tables
+    could agree everywhere the contract looked and still decide that value
+    differently, which is exactly the hole this contract used to have.
+    """
+    if fact["kind"] == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        if value < fact["lo"] or value > fact["hi"]:
+            return False
+        # domain_of walks lo, lo+step, ... and always ends on hi.
+        return value == fact["hi"] or (value - fact["lo"]) % fact["step"] == 0
+    if fact["kind"] == "enum":
+        return isinstance(value, str) and value in fact["members"]
+    return isinstance(value, bool)
 
 
 def grid_size(schema: list) -> int:
@@ -328,6 +366,12 @@ def _check_facts(facts: dict, schema: list) -> None:
                 _fail(ERROR_EXPECTED, "FACT_NOT_INT")
             if value < fact["lo"] or value > fact["hi"]:
                 _fail(ERROR_EXPECTED, "FACT_OUT_OF_RANGE")
+            if not in_domain(fact, value):
+                # In range but between two declared points. Refused rather than
+                # rounded: rounding would decide a case the fingerprint never
+                # saw, and silently deciding unenumerated cases is the defect
+                # this contract was rejected for.
+                _fail(ERROR_EXPECTED, "FACT_OFF_GRID")
         elif fact["kind"] == "enum":
             if not isinstance(value, str) or value not in fact["members"]:
                 _fail(ERROR_EXPECTED, "FACT_NOT_A_MEMBER")
@@ -336,101 +380,92 @@ def _check_facts(facts: dict, schema: list) -> None:
                 _fail(ERROR_EXPECTED, "FACT_NOT_BOOL")
 
 
-def first_match(table: dict, facts: dict, schema: list) -> int:
-    """Index of the rule that fires, or -1 when the default applies."""
-    by_name = {f["name"]: f for f in schema}
+def _first_match(table: dict, facts: dict, by_name: dict) -> int:
+    """Hot path. Takes a prebuilt name index because the agreement check walks
+    the whole canonical domain and rebuilding it per point is pure waste."""
     for index, rule in enumerate(table["rules"]):
         if all(_atom_holds(a, facts, by_name) for a in rule["atoms"]):
             return index
     return -1
 
 
-def evaluate_table(table: dict, facts: dict, schema: list) -> str:
-    _check_facts(facts, schema)
-    index = first_match(table, facts, schema)
+def first_match(table: dict, facts: dict, schema: list) -> int:
+    """Index of the rule that fires, or -1 when the default applies."""
+    return _first_match(table, facts, {f["name"]: f for f in schema})
+
+
+def _outcome_at(table: dict, index: int) -> str:
     return table["default"] if index < 0 else table["rules"][index]["outcome"]
 
 
+def evaluate_table(table: dict, facts: dict, schema: list) -> str:
+    _check_facts(facts, schema)
+    return _outcome_at(table, first_match(table, facts, schema))
+
+
 # --------------------------------------------------------------------------
-# Probes. Derived deterministically, so any validator reaches the same set.
+# Agreement.
+#
+# There is no probe set here and no sampling of any kind. The check visits
+# every point of the canonical domain, which by `in_domain` is exactly the set
+# of fact combinations `evaluate` will ever accept. Two tables that pass it
+# cannot decide any admissible case differently, and that is a proof rather
+# than a hope.
+#
+# The previous version sampled: it kept the declared bounds plus c-1, c, c+1
+# around every integer constant, then thinned each fact to at most twelve
+# values. Thinning could discard a boundary that mattered. With several
+# thresholds declared, a leader compiling `x < 50` and a validator compiling
+# `x < 51` could lose both 50 and 51 from the kept values, agree on every
+# retained point, pass the dead rule check, and still decide x = 50
+# differently. tests/test_deterministic.py pins that exact case.
+#
+# Cost is bounded by MAX_GRID, which parse_schema enforces before a policy can
+# ever be compiled, so a schema this contract cannot fully enumerate is refused
+# up front instead of being approximated later.
 # --------------------------------------------------------------------------
 
-def _shrink(values: list, keep: int) -> list:
-    """Deterministically thin a value list, always keeping the ends."""
-    if len(values) <= keep:
-        return values
-    if keep < 2:
-        return values[:1]
-    step = (len(values) - 1) / float(keep - 1)
-    picked = sorted({values[min(len(values) - 1, int(round(i * step)))]
-                     for i in range(keep)})
-    return picked
-
-
-def boundary_probes(schema: list, tables: list) -> list:
-    """Declared bounds, every enum member, both booleans, and c-1, c, c+1
-    around every integer constant either table mentions."""
-    domains = []
-    for fact in schema:
-        if fact["kind"] != "int":
-            domains.append(domain_of(fact))
-            continue
-        lo, hi = fact["lo"], fact["hi"]
-        values = {lo, hi}
-        for table in tables:
-            for rule in table.get("rules", []):
-                for atom in rule.get("atoms", []):
-                    if atom["fact"] != fact["name"]:
-                        continue
-                    try:
-                        c = int(str(atom["value"]).strip())
-                    except (ValueError, TypeError):
-                        continue
-                    for candidate in (c - 1, c, c + 1):
-                        if lo <= candidate <= hi:
-                            values.add(candidate)
-        domains.append(_shrink(sorted(values), MAX_VALUES_PER_FACT))
-
-    total = 1
-    for values in domains:
-        total *= len(values)
-    while total > MAX_PROBES:
-        widest = max(range(len(domains)), key=lambda i: len(domains[i]))
-        if len(domains[widest]) <= 2:
-            break
-        total //= len(domains[widest])
-        domains[widest] = _shrink(domains[widest],
-                                  max(2, len(domains[widest]) // 2))
-        total *= len(domains[widest])
-
-    return _product(schema, domains)
-
-
-def dead_rules(table: dict, schema: list, probes: list) -> list:
-    """Rules no probe point can ever reach, because earlier rules cover them."""
+def dead_rules(table: dict, schema: list) -> list:
+    """Rules that no admissible fact combination can reach, because earlier
+    rules already cover them. Exhaustive, so a rule reported dead really is
+    unreachable rather than merely unvisited."""
+    by_name = {f["name"]: f for f in schema}
     reached = set()
-    for facts in probes:
-        index = first_match(table, facts, schema)
+    for facts in canonical_grid(schema):
+        index = _first_match(table, facts, by_name)
         if index >= 0:
             reached.add(index)
     return [i for i in range(len(table["rules"])) if i not in reached]
 
 
-def tables_agree(mine: dict, theirs: dict, schema: list, probes: list) -> bool:
+def tables_agree(mine: dict, theirs: dict, schema: list) -> bool:
     """The whole consensus rule, in one testable place.
 
     Symmetric on purpose: a sloppy table is refused whichever side produced it,
     and refusing rotates the leader rather than freezing junk into storage.
+
+    Outcome agreement and reachability are collected in a single walk of the
+    domain, because walking it three times to answer three questions about the
+    same points is the kind of thing that pushes a schema over the gas limit
+    and tempts the next person into sampling again.
     """
+    by_name = {f["name"]: f for f in schema}
+    reached_mine = set()
+    reached_theirs = set()
     try:
-        if dead_rules(theirs, schema, probes):
-            return False
-        if dead_rules(mine, schema, probes):
-            return False
-        for facts in probes:
-            if evaluate_table(mine, facts, schema) != \
-               evaluate_table(theirs, facts, schema):
+        for facts in canonical_grid(schema):
+            i = _first_match(mine, facts, by_name)
+            j = _first_match(theirs, facts, by_name)
+            if _outcome_at(mine, i) != _outcome_at(theirs, j):
                 return False
+            if i >= 0:
+                reached_mine.add(i)
+            if j >= 0:
+                reached_theirs.add(j)
+        if len(reached_mine) != len(mine["rules"]):
+            return False
+        if len(reached_theirs) != len(theirs["rules"]):
+            return False
     except (KeyError, TypeError, ValueError, gl.vm.UserError):
         return False
     return True
@@ -470,8 +505,16 @@ def schema_brief(schema: list) -> str:
     lines = []
     for fact in schema:
         if fact["kind"] == "int":
-            lines.append("- %s: integer from %d to %d" %
-                         (fact["name"], fact["lo"], fact["hi"]))
+            if fact["step"] == 1:
+                lines.append("- %s: integer from %d to %d" %
+                             (fact["name"], fact["lo"], fact["hi"]))
+            else:
+                # The declared domain is coarser than every integer, and the
+                # contract will only ever be asked about these points, so say
+                # so rather than let the model aim at a value between them.
+                lines.append("- %s: integer from %d to %d in steps of %d" %
+                             (fact["name"], fact["lo"], fact["hi"],
+                              fact["step"]))
         elif fact["kind"] == "enum":
             lines.append("- %s: one of %s" %
                          (fact["name"], ", ".join(fact["members"])))
@@ -589,8 +632,7 @@ class Statute(gl.Contract):
                 mine = parse_table(leader_fn(), schema, outcomes)
             except gl.vm.UserError:
                 return False
-            probes = boundary_probes(schema, [mine, theirs])
-            return tables_agree(mine, theirs, schema, probes)
+            return tables_agree(mine, theirs, schema)
 
         agreed = parse_table(gl.vm.run_nondet_unsafe(leader_fn, validator_fn),
                              schema, outcomes)
