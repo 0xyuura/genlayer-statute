@@ -6,6 +6,8 @@ decision table, then decided deterministically forever.**
 Live on Testnet Bradbury at
 [`0x54378836847a768Db56918E8Fa38149c7db780c1`](https://explorer-bradbury.genlayer.com/address/0x54378836847a768Db56918E8Fa38149c7db780c1)
 
+Call it without a local setup: [open it in GenLayer Studio](https://studio.genlayer.com/?import-contract=0x54378836847a768Db56918E8Fa38149c7db780c1)
+
 This is the revised contract. The first submission was rejected for a real
 consensus defect, and what changed is set out immediately below.
 
@@ -94,6 +96,15 @@ Nothing is sampled and nothing is thinned. The check visits the entire product,
 which by construction is exactly the set of fact combinations `evaluate` will
 ever accept, so two tables that agree cannot decide any admissible case
 differently. That is a proof, not a heuristic.
+
+The whole rule is one module level function, `tables_agree` in
+[`contracts/statute.py`](contracts/statute.py), and the domain it walks is
+defined once by `in_domain` in the same file. `evaluate` calls `in_domain`
+too, and that shared definition is precisely what makes the set the
+contract decides and the set consensus checks one set. Neither hides in a
+closure, so [`tests/test_deterministic.py`](tests/test_deterministic.py)
+reaches both from plain CPython, and its `RejectionRegression` and
+`CanonicalDomain` cases are the two that answer the review directly.
 
 What makes it affordable is that the schema declares a **finite** domain and
 `parse_schema` refuses any schema whose domain exceeds `MAX_GRID`. A policy
